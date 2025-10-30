@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nutrition Planner</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
+    <div class="max-w-6xl mx-auto p-6">
+        <div class="bg-white rounded-2xl shadow-xl p-8">
+            <div class="flex items-center gap-3 mb-8">
+                <svg class="w-8 h-8 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                </svg>
+                <h1 class="text-3xl font-bold text-gray-800">Nutrition Planner</h1>
+            </div>
+            
+            <div id="app"></div>
+        </div>
+    </div>
+
+    <script>
+        const state = {
+            step: 1,
+            inputMethod: null,
+            calories: 0,
+            goalType: null,
+            adjustedCalories: 0,
+            macroChoice: null,
+            isTrainingBreakdownOpen: true,
+            isCalorieBankingOpen: true,
+            selectedTrainingDays: ['Mon', 'Tue', 'Thu', 'Fri'],
+            bankingDay: 'Sat',
+            bankingDays: 3,
+            bankedCalories: 500,
+            age: '',
+            gender: 'male',
+            weight: '',
+            height: '',
+            activityLevel: '1.55',
+            manualWeight: ''
+        };
+
+        function calculateBMR() {
+            const w = parseFloat(state.weight);
+            const h = parseFloat(state.height);
+            const a = parseFloat(state.age);
+            let bmr;
+            if (state.gender === 'male') {
+                bmr = (10 * w) + (6.25 * h) - (5 * a) + 5;
+            } else {
+                bmr = (10 * w) + (6.25 * h) - (5 * a) - 161;
+            }
+            return Math.round(bmr * parseFloat(state.activityLevel));
+        }
+
+        function calculateAdjustedCalories(maintenanceCals, bodyWeight, goal) {
+            const weightInKg = parseFloat(bodyWeight);
+            if (goal === 'lose-1percent') {
+                const dailyDeficit = (weightInKg * 0.01 * 7700) / 7;
+                return Math.round(maintenanceCals - dailyDeficit);
+            } else if (goal === 'lose-0.5percent') {
+                const dailyDeficit = (weightInKg * 0.005 * 7700) / 7;
+                return Math.round(maintenanceCals - dailyDeficit);
+            } else if (goal === 'maintain') {
+                return Math.round(maintenanceCals);
+            } else if (goal === 'gain-0.5percent') {
+                const dailySurplus = (weightInKg * 0.005 * 7700) / 30;
+                return Math.round(maintenanceCals + dailySurplus);
+            } else if (goal === 'gain-1percent') {
+                const dailySurplus = (weightInKg * 0.01 * 7700) / 30;
+                return Math.round(maintenanceCals + dailySurplus);
+            }
+            return maintenanceCals;
+        }
+
+        function getMacros(cals, type) {
+            let protein, carbs, fat;
+            if (type === 'high-protein') {
+                protein = Math.round((cals * 0.35) / 4);
+                carbs = Math.round((cals * 0.35) / 4);
+                fat = Math.round((cals * 0.30) / 9);
+            } else if (type === 'high-carb') {
+                protein = Math.round((cals * 0.25) / 4);
+                carbs = Math.round((cals * 0.50) / 4);
+                fat = Math.round((cals * 0.25) / 9);
+            } else {
+                protein = Math.round((cals * 0.30) / 4);
+                carbs = Math.round((cals * 0.40) / 4);
+                fat = Math.round((cals * 0.30) / 9);
+            }
+            return { protein, carbs, fat };
+        }
+
+        function getWeeklyDistribution(totalCals, trainingDaysList) {
+            const weeklyTotal = totalCals * 7;
+            const numTraining = trainingDaysList.length;
+            const restDays = 7 - numTraining;
+            const avgCals = weeklyTotal / (numTraining * 1.1 + restDays * 0.9);
+            const trainingCalories = Math.round(avgCals * 1.1);
+            const restCalories = Math.round(avgCals * 0.9);
+            const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+            return days.map((day) => ({
+                day,
+                calories: trainingDaysList.includes(day) ? trainingCalories : restCalories,
+                type: trainingDaysList.includes(day) ? 'Training' : 'Rest'
+            }));
+        }
+
+        function getCalorieBankingDistribution(dailyCals, targetDay, daysBeforeToBank, caloriesToBank) {
+            const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+            const targetDayIndex = days.indexOf(targetDay);
+            const deficitPerDay = caloriesToBank / daysBeforeToBank;
+            const bankingDayIndices = [];
+            for (let i = 1; i <= daysBeforeToBank; i++) {
+                let idx = targetDayIndex - i;
+                if (idx < 0) idx += 7;
+                bankingDayIndices.push(idx);
+            }
+            return days.map((day, idx) => {
+                let dayCalories = dailyCals;
+                let dayType = 'Normal';
+                if (idx === targetDayIndex) {
+                    dayCalories = dailyCals + caloriesToBank;
+                    dayType = 'Banking Target';
+                } else if (bankingDayIndices.includes(idx)) {
+                    dayCalories = dailyCals - deficitPerDay;
+                    dayType = 'Banking';
+                }
+                return { day, calories: Math.round(dayCalories), type: dayType };
+            });
+        }
+
+        function toggleTrainingDay(day) {
+            if (state.selectedTrainingDays.includes(day)) {
+                if (state.selectedTrainingDays.length > 1) {
+                    state.selectedTrainingDays = state.selectedTrainingDays.filter(d => d !== day);
+                }
+            } else {
+                if (state.selectedTrainingDays.length < 7) {
+                    state.selectedTrainingDays.push(day);
+                }
+            }
+            render();
+        }
+
+        let trainingChart = null;
+        let bankingChart = null;
+
+        function createChart(canvasId, data, isTraining) {
+            const ctx = document.getElementById(canvasId);
+            if (!ctx) return;
+            
+            const colors = data.map(d => {
+                if (isTraining) {
+                    return d.type === 'Training' ? '#6366f1' : '#94a3b8';
+                } else {
+                    if (d.type === 'Banking') return '#10b981';
+                    if (d.type === 'Banking Target') return '#14b8a6';
+                    return '#94a3b8';
+                }
+            });
+
+            if (canvasId === 'trainingChart' && trainingChart) {
+                trainingChart.destroy();
+            }
+            if (canvasId === 'bankingChart' && bankingChart) {
+                bankingChart.destroy();
+            }
+
+            const calories = data.map(d => d.calories);
+            const minCalories = Math.min(...calories);
+            const maxCalories = Math.max(...calories);
+            const range = maxCalories - minCalories;
+            const yMin = Math.floor(minCalories - range * 0.2);
+            const yMax = Math.ceil(maxCalories + range * 0.2);
+
+            const chart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: data.map(d => d.day),
+                    datasets: [{
+                        label: 'Calories',
+                        data: data.map(d => d.calories),
+                        backgroundColor: colors,
+                        borderColor: colors,
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: false,
+                            min: yMin,
+                            max: yMax
+                        }
+                    }
+                }
+            });
+
+            if (canvasId === 'trainingChart') {
+                trainingChart = chart;
+            } else {
+                bankingChart = chart;
+            }
+        }
+
+        function render() {
+            const app = document.getElementById('app');
+            
+            if (state.step === 1) {
+                app.innerHTML = `
+                    <div class="space-y-6">
+                        <h2 class="text-2xl font-semibold text-gray-700 mb-6">How would you like to set your calories?</h2>
+                        <div class="grid md:grid-cols-2 gap-6">
+                            <button onclick="selectMethod('manual')" class="p-8 border-2 border-indigo-200 rounded-xl hover:border-indigo-400 hover:bg-indigo-50 transition-all">
+                                <svg class="w-12 h-12 text-indigo-600 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z"></path>
+                                </svg>
+                                <h3 class="text-xl font-semibold mb-2">Enter Calories Manually</h3>
+                                <p class="text-gray-600">I already know my daily calorie target</p>
+                            </button>
+                            <button onclick="selectMethod('calculate')" class="p-8 border-2 border-indigo-200 rounded-xl hover:border-indigo-400 hover:bg-indigo-50 transition-all">
+                                <svg class="w-12 h-12 text-indigo-600 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path>
+                                </svg>
+                                <h3 class="text-xl font-semibold mb-2">Calculate My Calories</h3>
+                                <p class="text-gray-600">Use the Mifflin-St Jeor equation</p>
+                            </button>
+                        </div>
+                    </div>
+                `;
+            } else if (state.step === 2 && state.inputMethod === 'manual') {
+                app.innerHTML = `
+                    <div class="space-y-6">
+                        <h2 class="text-2xl font-semibold text-gray-700 mb-6">Enter Your Daily Calories</h2>
+                        <div class="max-w-md">
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Daily Calorie Target</label>
+                            <input type="number" id="calorieInput" value="${state.calories || ''}" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent" placeholder="e.g., 2000">
+                            <button onclick="submitCalories()" class="mt-4 w-full bg-indigo-600 text-white py-3 rounded-lg font-semibold hover:bg-indigo-700 transition-colors">Continue</button>
+                        </div>
+                    </div>
+                `;
+            } else if (state.step === 2 && state.inputMethod === 'calculate') {
+                app.innerHTML = `
+                    <div class="space-y-6">
+                        <h2 class="text-2xl font-semibold text-gray-700 mb-6">Calculate Your Daily Calories</h2>
+                        <div class="max-w-2xl grid md:grid-cols-2 gap-6">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">Age</label>
+                                <input type="number" id="ageInput" value="${state.age}" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="Years">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">Gender</label>
+                                <select id="genderInput" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+                                    <option value="male" ${state.gender === 'male' ? 'selected' : ''}>Male</option>
+                                    <option value="female" ${state.gender === 'female' ? 'selected' : ''}>Female</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">Weight (kg)</label>
+                                <input type="number" id="weightInput" value="${state.weight}" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="kg">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">Height (cm)</label>
+                                <input type="number" id="heightInput" value="${state.height}" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500" placeholder="cm">
+                            </div>
+                            <div class="md:col-span-2">
+                                <label class="block text-sm font-medium text-gray-700 mb-2">Activity Level</label>
+                                <select id="activityInput" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500">
+                                    <option value="1.2">Sedentary (little or no exercise)</option>
+                                    <option value="1.375">Lightly active (1-3 days/week)</option>
+                                    <option value="1.55" selected>Moderately active (3-5 days/week)</option>
+                                    <option value="1.725">Very active (6-7 days/week)</option>
+                                    <option value="1.9">Extremely active (physical job & training)</option>
+                                </select>
+                            </div>
+                        </div>
+                        <button onclick="calculateCalories()" class="w-full max-w-md bg-indigo-600 text-white py-3 rounded-lg font-semibold hover:bg-indigo-700 transition-colors">Calculate My Calories</button>
+                    </div>
+                `;
+            } else if (state.step === 2.5) {
+                app.innerHTML = `
+                    <div class="space-y-6">
+                        <h2 class="text-2xl font-semibold text-gray-700 mb-6">Enter Your Body Weight</h2>
+                        <p class="text-gray-600 mb-4">We need your weight to calculate goal-adjusted calories.</p>
+                        <div class="max-w-md">
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Body Weight (kg)</label>
+                            <input type="number" id="manualWeightInput" value="${state.manualWeight}" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent" placeholder="e.g., 75">
+                            <button onclick="submitManualWeight()" class="mt-4 w-full bg-indigo-600 text-white py-3 rounded-lg font-semibold hover:bg-indigo-700 transition-colors">Continue</button>
+                        </div>
+                    </div>
+                `;
+            } else if (state.step === 3) {
+                app.innerHTML = `
+                    <div class="space-y-6">
+                        <div class="bg-indigo-50 p-6 rounded-xl mb-6">
+                            <h3 class="text-xl font-semibold text-indigo-900 mb-2">Your Maintenance Calories</h3>
+                            <p class="text-4xl font-bold text-indigo-600">${state.calories} kcal</p>
+                        </div>
+                        <h2 class="text-2xl font-semibold text-gray-700 mb-6">What is Your Goal?</h2>
+                        <div class="space-y-4">
+                            <button onclick="selectGoal('lose-1percent')" class="w-full p-6 border-2 border-red-200 rounded-xl hover:border-red-400 hover:bg-red-50 transition-all text-left">
+                                <h3 class="text-xl font-semibold mb-2 text-red-900">Lose Weight - 1% per week</h3>
+                                <p class="text-gray-600">Recommended fat loss rate for most people</p>
+                            </button>
+                            <button onclick="selectGoal('lose-0.5percent')" class="w-full p-6 border-2 border-orange-200 rounded-xl hover:border-orange-400 hover:bg-orange-50 transition-all text-left">
+                                <h3 class="text-xl font-semibold mb-2 text-orange-900">Lose Weight - 0.5% per week</h3>
+                                <p class="text-gray-600">Moderate fat loss rate, easier to maintain</p>
+                            </button>
+                            <button onclick="selectGoal('maintain')" class="w-full p-6 border-2 border-blue-200 rounded-xl hover:border-blue-400 hover:bg-blue-50 transition-all text-left">
+                                <h3 class="text-xl font-semibold mb-2 text-blue-900">Maintain Weight</h3>
+                                <p class="text-gray-600">Stay at your current weight</p>
+                            </button>
+                            <button onclick="selectGoal('gain-0.5percent')" class="w-full p-6 border-2 border-green-200 rounded-xl hover:border-green-400 hover:bg-green-50 transition-all text-left">
+                                <h3 class="text-xl font-semibold mb-2 text-green-900">Gain Weight - 0.5% per month</h3>
+                                <p class="text-gray-600">Moderate muscle gain, minimize fat gain</p>
+                            </button>
+                            <button onclick="selectGoal('gain-1percent')" class="w-full p-6 border-2 border-emerald-200 rounded-xl hover:border-emerald-400 hover:bg-emerald-50 transition-all text-left">
+                                <h3 class="text-xl font-semibold mb-2 text-emerald-900">Gain Weight - 1% per month</h3>
+                                <p class="text-gray-600">Recommended muscle gain rate for most people</p>
+                            </button>
+                        </div>
+                    </div>
+                `;
+            } else if (state.step === 4) {
+                const diff = state.adjustedCalories - state.calories;
+                app.innerHTML = `
+                    <div class="space-y-6">
+                        <div class="bg-indigo-50 p-6 rounded-xl mb-6">
+                            <h3 class="text-xl font-semibold text-indigo-900 mb-2">Your Goal-Adjusted Calories</h3>
+                            <p class="text-4xl font-bold text-indigo-600">${state.adjustedCalories} kcal</p>
+                            ${diff !== 0 ? `<p class="text-sm text-indigo-700 mt-2">${diff > 0 ? '+' : ''}${diff} kcal from maintenance</p>` : ''}
+                        </div>
+                        <h2 class="text-2xl font-semibold text-gray-700 mb-6">Choose Your Macro Breakdown</h2>
+                        <div class="grid md:grid-cols-3 gap-6">
+                            <button onclick="selectMacro('high-protein')" class="p-6 border-2 border-indigo-200 rounded-xl hover:border-indigo-400 hover:bg-indigo-50 transition-all">
+                                <h3 class="text-xl font-semibold mb-4">High Protein</h3>
+                                <div class="space-y-2 text-left">
+                                    <p class="text-gray-700"><span class="font-semibold">Protein:</span> 35%</p>
+                                    <p class="text-gray-700"><span class="font-semibold">Carbs:</span> 35%</p>
+                                    <p class="text-gray-700"><span class="font-semibold">Fat:</span> 30%</p>
+                                </div>
+                            </button>
+                            <button onclick="selectMacro('balanced')" class="p-6 border-2 border-indigo-200 rounded-xl hover:border-indigo-400 hover:bg-indigo-50 transition-all">
+                                <h3 class="text-xl font-semibold mb-4">Balanced</h3>
+                                <div class="space-y-2 text-left">
+                                    <p class="text-gray-700"><span class="font-semibold">Protein:</span> 30%</p>
+                                    <p class="text-gray-700"><span class="font-semibold">Carbs:</span> 40%</p>
+                                    <p class="text-gray-700"><span class="font-semibold">Fat:</span> 30%</p>
+                                </div>
+                            </button>
+                            <button onclick="selectMacro('high-carb')" class="p-6 border-2 border-indigo-200 rounded-xl hover:border-indigo-400 hover:bg-indigo-50 transition-all">
+                                <h3 class="text-xl font-semibold mb-4">High Carb</h3>
+                                <div class="space-y-2 text-left">
+                                    <p class="text-gray-700"><span class="font-semibold">Protein:</span> 25%</p>
+                                    <p class="text-gray-700"><span class="font-semibold">Carbs:</span> 50%</p>
+                                    <p class="text-gray-700"><span class="font-semibold">Fat:</span> 25%</p>
+                                </div>
+                            </button>
+                        </div>
+                    </div>
+                `;
+            } else if (state.step === 5) {
+                const macros = getMacros(state.adjustedCalories || state.calories, state.macroChoice);
+                const weeklyData = getWeeklyDistribution(state.adjustedCalories || state.calories, state.selectedTrainingDays);
+                const trainingCal = weeklyData.find(d => d.type === 'Training')?.calories || (state.adjustedCalories || state.calories);
+                const restCal = weeklyData.find(d => d.type === 'Rest')?.calories || (state.adjustedCalories || state.calories);
+                const bankingData = getCalorieBankingDistribution(state.adjustedCalories || state.calories, state.bankingDay, state.bankingDays, state.bankedCalories);
+
+                app.innerHTML = `
+                    <div class="space-y-8">
+                        <div class="bg-gradient-to-r from-indigo-500 to-purple-600 text-white p-8 rounded-xl">
+                            <h2 class="text-3xl font-bold mb-6">Your Nutrition Plan</h2>
+                            <div class="grid md:grid-cols-4 gap-6">
+                                <div class="bg-white/10 backdrop-blur rounded-lg p-4">
+                                    <p class="text-indigo-100 text-sm mb-1">Daily Calories</p>
+                                    <p class="text-3xl font-bold">${state.adjustedCalories || state.calories}</p>
+                                    <p class="text-sm text-indigo-100">kcal</p>
+                                </div>
+                                <div class="bg-white/10 backdrop-blur rounded-lg p-4">
+                                    <p class="text-indigo-100 text-sm mb-1">Protein</p>
+                                    <p class="text-3xl font-bold">${macros.protein}</p>
+                                    <p class="text-sm text-indigo-100">grams</p>
+                                </div>
+                                <div class="bg-white/10 backdrop-blur rounded-lg p-4">
+                                    <p class="text-indigo-100 text-sm mb-1">Carbs</p>
+                                    <p class="text-3xl font-bold">${macros.carbs}</p>
+                                    <p class="text-sm text-indigo-100">grams</p>
+                                </div>
+                                <div class="bg-white/10 backdrop-blur rounded-lg p-4">
+                                    <p class="text-indigo-100 text-sm mb-1">Fat</p>
+                                    <p class="text-3xl font-bold">${macros.fat}</p>
+                                    <p class="text-sm text-indigo-100">grams</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="space-y-6">
+                            <h3 class="text-2xl font-semibold text-gray-800 mb-4">Weekly Calorie Distribution Options</h3>
+                            
+                            <div class="bg-white border-2 border-indigo-200 rounded-xl overflow-hidden shadow-sm">
+                                <button onclick="toggleSection('training')" class="w-full bg-gradient-to-r from-indigo-50 to-purple-50 px-6 py-4 font-semibold text-lg text-gray-800 hover:from-indigo-100 hover:to-purple-100 transition-all flex items-center justify-between">
+                                    <span>Training Day & Rest Day Breakdown</span>
+                                    <svg class="w-6 h-6 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="${state.isTrainingBreakdownOpen ? 'M5 15l7-7 7 7' : 'M19 9l-7 7-7-7'}"></path>
+                                    </svg>
+                                </button>
+                                
+                                <div id="trainingSection" style="display: ${state.isTrainingBreakdownOpen ? 'block' : 'none'};" class="p-6 bg-gray-50">
+                                    <p class="text-gray-600 mb-6">Select which days you train to see your optimized calorie distribution.</p>
+                                    <div class="bg-white p-6 rounded-xl shadow-md border border-gray-200">
+                                        <h4 class="text-lg font-semibold text-gray-700 mb-4">Select Your Training Days</h4>
+                                        <div class="flex flex-wrap gap-3 mb-6">
+                                            ${['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(day => `
+                                                <button onclick="toggleTrainingDay('${day}')" class="px-6 py-3 rounded-lg font-semibold transition-all ${state.selectedTrainingDays.includes(day) ? 'bg-indigo-600 text-white shadow-md' : 'bg-white text-gray-700 border-2 border-gray-300 hover:border-indigo-300'}">
+                                                    ${day}
+                                                </button>
+                                            `).join('')}
+                                        </div>
+                                        <p class="text-sm text-gray-600 mb-6">${state.selectedTrainingDays.length} training day${state.selectedTrainingDays.length !== 1 ? 's' : ''} selected</p>
+                                        <div class="grid md:grid-cols-3 gap-4 mb-6">
+                                            <div class="bg-indigo-50 p-4 rounded-lg border border-indigo-100">
+                                                <p class="text-sm text-indigo-700 mb-1">Training Days</p>
+                                                <p class="text-2xl font-bold text-indigo-600">${trainingCal} kcal</p>
+                                            </div>
+                                            <div class="bg-slate-100 p-4 rounded-lg border border-slate-200">
+                                                <p class="text-sm text-slate-700 mb-1">Rest Days</p>
+                                                <p class="text-2xl font-bold text-slate-600">${restCal} kcal</p>
+                                            </div>
+                                            <div class="bg-purple-50 p-4 rounded-lg border border-purple-100">
+                                                <p class="text-sm text-purple-700 mb-1">Weekly Total</p>
+                                                <p class="text-2xl font-bold text-purple-600">${((state.adjustedCalories || state.calories) * 7).toLocaleString()} kcal</p>
+                                            </div>
+                                        </div>
+                                        <div style="height: 300px;">
+                                            <canvas id="trainingChart"></canvas>
+                                        </div>
+                                        <div class="flex gap-4 justify-center mt-4">
+                                            <div class="flex items-center gap-2">
+                                                <div class="w-4 h-4 bg-indigo-600 rounded"></div>
+                                                <span class="text-sm text-gray-600">Training Day</span>
+                                            </div>
+                                            <div class="flex items-center gap-2">
+                                                <div class="w-4 h-4 bg-slate-400 rounded"></div>
+                                                <span class="text-sm text-gray-600">Rest Day</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="bg-white border-2 border-emerald-200 rounded-xl overflow-hidden shadow-sm">
+                                <button onclick="toggleSection('banking')" class="w-full bg-gradient-to-r from-emerald-50 to-teal-50 px-6 py-4 font-semibold text-lg text-gray-800 hover:from-emerald-100 hover:to-teal-100 transition-all flex items-center justify-between">
+                                    <span>Calorie Banking Strategy</span>
+                                    <svg class="w-6 h-6 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="${state.isCalorieBankingOpen ? 'M5 15l7-7 7 7' : 'M19 9l-7 7-7-7'}"></path>
+                                    </svg>
+                                </button>
+                                
+                                <div id="bankingSection" style="display: ${state.isCalorieBankingOpen ? 'block' : 'none'};" class="p-6 bg-gray-50">
+                                    <p class="text-gray-600 mb-6">Save calories from previous days to enjoy more on a special day, while maintaining your weekly calorie goal.</p>
+                                    <div class="bg-white p-6 rounded-xl shadow-md border border-gray-200">
+                                        <div class="grid md:grid-cols-3 gap-6 mb-6">
+                                            <div>
+                                                <label class="block text-sm font-medium text-gray-700 mb-2">Banking Target Day</label>
+                                                <select id="bankingDaySelect" onchange="updateBankingDay(this.value)" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500">
+                                                    ${['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(day => 
+                                                        `<option value="${day}" ${state.bankingDay === day ? 'selected' : ''}>${day === 'Mon' ? 'Monday' : day === 'Tue' ? 'Tuesday' : day === 'Wed' ? 'Wednesday' : day === 'Thu' ? 'Thursday' : day === 'Fri' ? 'Friday' : day === 'Sat' ? 'Saturday' : 'Sunday'}</option>`
+                                                    ).join('')}
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label class="block text-sm font-medium text-gray-700 mb-2">Days to Bank From</label>
+                                                <select id="bankingDaysSelect" onchange="updateBankingDays(this.value)" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500">
+                                                    ${[1,2,3,4,5,6].map(num => 
+                                                        `<option value="${num}" ${state.bankingDays === num ? 'selected' : ''}>${num} day${num > 1 ? 's' : ''} before</option>`
+                                                    ).join('')}
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label class="block text-sm font-medium text-gray-700 mb-2">Total Calories to Bank</label>
+                                                <input type="number" id="bankedCaloriesInput" value="${state.bankedCalories}" onchange="updateBankedCalories(this.value)" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500" min="0" step="50">
+                                            </div>
+                                        </div>
+                                        <div class="grid md:grid-cols-3 gap-4 mb-6">
+                                            <div class="bg-emerald-50 p-4 rounded-lg border border-emerald-100">
+                                                <p class="text-sm text-emerald-700 mb-1">Banking Day Calories</p>
+                                                <p class="text-2xl font-bold text-emerald-600">${Math.round((state.adjustedCalories || state.calories) - (state.bankedCalories / state.bankingDays))} kcal</p>
+                                            </div>
+                                            <div class="bg-teal-50 p-4 rounded-lg border border-teal-100">
+                                                <p class="text-sm text-teal-700 mb-1">Target Day Calories</p>
+                                                <p class="text-2xl font-bold text-teal-600">${(state.adjustedCalories || state.calories) + state.bankedCalories} kcal</p>
+                                            </div>
+                                            <div class="bg-purple-50 p-4 rounded-lg border border-purple-100">
+                                                <p class="text-sm text-purple-700 mb-1">Weekly Total</p>
+                                                <p class="text-2xl font-bold text-purple-600">${((state.adjustedCalories || state.calories) * 7).toLocaleString()} kcal</p>
+                                            </div>
+                                        </div>
+                                        <div style="height: 300px;">
+                                            <canvas id="bankingChart"></canvas>
+                                        </div>
+                                        <div class="flex gap-4 justify-center mt-4 flex-wrap">
+                                            <div class="flex items-center gap-2">
+                                                <div class="w-4 h-4 bg-emerald-500 rounded"></div>
+                                                <span class="text-sm text-gray-600">Banking Day</span>
+                                            </div>
+                                            <div class="flex items-center gap-2">
+                                                <div class="w-4 h-4 bg-teal-500 rounded"></div>
+                                                <span class="text-sm text-gray-600">Target Day</span>
+                                            </div>
+                                            <div class="flex items-center gap-2">
+                                                <div class="w-4 h-4 bg-slate-400 rounded"></div>
+                                                <span class="text-sm text-gray-600">Normal Day</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <button onclick="startOver()" class="w-full bg-gray-600 text-white py-3 rounded-lg font-semibold hover:bg-gray-700 transition-colors">
+                            Start Over
+                        </button>
+                    </div>
+                `;
+
+                setTimeout(() => {
+                    createChart('trainingChart', weeklyData, true);
+                    createChart('bankingChart', bankingData, false);
+                }, 0);
+            }
+        }
+
+        function selectMethod(method) {
+            state.inputMethod = method;
+            state.step = 2;
+            render();
+        }
+
+        function submitCalories() {
+            const input = document.getElementById('calorieInput');
+            state.calories = parseInt(input.value) || 0;
+            if (state.calories > 0) {
+                state.step = 2.5;
+                render();
+            }
+        }
+
+        function calculateCalories() {
+            state.age = document.getElementById('ageInput').value;
+            state.gender = document.getElementById('genderInput').value;
+            state.weight = document.getElementById('weightInput').value;
+            state.height = document.getElementById('heightInput').value;
+            state.activityLevel = document.getElementById('activityInput').value;
+            
+            if (state.age && state.weight && state.height) {
+                state.calories = calculateBMR();
+                state.step = 3;
+                render();
+            }
+        }
+
+        function submitManualWeight() {
+            const input = document.getElementById('manualWeightInput');
+            state.manualWeight = input.value;
+            if (state.manualWeight && parseFloat(state.manualWeight) > 0) {
+                state.step = 3;
+                render();
+            }
+        }
+
+        function selectGoal(goal) {
+            state.goalType = goal;
+            const bodyWeight = state.inputMethod === 'manual' ? state.manualWeight : state.weight;
+            state.adjustedCalories = calculateAdjustedCalories(state.calories, bodyWeight, goal);
+            state.step = 4;
+            render();
+        }
+
+        function selectMacro(macro) {
+            state.macroChoice = macro;
+            state.step = 5;
+            render();
+        }
+
+        function toggleSection(section) {
+            if (section === 'training') {
+                state.isTrainingBreakdownOpen = !state.isTrainingBreakdownOpen;
+            } else {
+                state.isCalorieBankingOpen = !state.isCalorieBankingOpen;
+            }
+            render();
+        }
+
+        function updateBankingDay(value) {
+            state.bankingDay = value;
+            render();
+        }
+
+        function updateBankingDays(value) {
+            state.bankingDays = parseInt(value);
+            render();
+        }
+
+        function updateBankedCalories(value) {
+            state.bankedCalories = parseInt(value) || 0;
+            render();
+        }
+
+        function startOver() {
+            state.step = 1;
+            state.inputMethod = null;
+            state.macroChoice = null;
+            state.calories = 0;
+            state.goalType = null;
+            state.adjustedCalories = 0;
+            state.manualWeight = '';
+            state.isTrainingBreakdownOpen = true;
+            state.isCalorieBankingOpen = true;
+            state.selectedTrainingDays = ['Mon', 'Tue', 'Thu', 'Fri'];
+            state.bankingDay = 'Sat';
+            state.bankingDays = 3;
+            state.bankedCalories = 500;
+            render();
+        }
+
+        // Initial render
+        render();
+    </script>
+</body>
+</html>
